@@ -595,15 +595,32 @@ public class Cuda {
                                           long [] srcAddrs,
                                           long [] copySizes,
                                           Stream stream) {
-    // Temporary sub-par stand-in for a multi-buffer copy CUDA kernel
     assert(destAddrs.length == srcAddrs.length);
     assert(copySizes.length == destAddrs.length);
     try (NvtxRange copyRange = new NvtxRange("multiBufferCopyAsync", NvtxColor.CYAN)){
-      for (int i = 0; i < destAddrs.length; i++) {
-        asyncMemcpy(destAddrs[i], srcAddrs[i], copySizes[i], CudaMemcpyKind.DEVICE_TO_DEVICE, stream);
+      if (destAddrs.length >= MULTI_BUFFER_COPY_KERNEL_THRESHOLD) {
+        // One small H2D of the address/size table plus one batched copy kernel instead
+        // of one JNI + CUDA API call per buffer.
+        multiBufferCopyAsyncNative(destAddrs, srcAddrs, copySizes, stream.getStream());
+      } else {
+        for (int i = 0; i < destAddrs.length; i++) {
+          asyncMemcpy(destAddrs[i], srcAddrs[i], copySizes[i], CudaMemcpyKind.DEVICE_TO_DEVICE,
+              stream);
+        }
       }
     }
   }
+
+  /**
+   * Below this many buffers a plain per-buffer async memcpy loop is cheaper than
+   * uploading the address table and launching the batched copy kernel.
+   */
+  private static final int MULTI_BUFFER_COPY_KERNEL_THRESHOLD = 64;
+
+  private static native void multiBufferCopyAsyncNative(long[] destAddrs,
+                                                        long[] srcAddrs,
+                                                        long[] copySizes,
+                                                        long stream);
   /**
    * Begins an Nsight profiling session, if a profiler is currently attached.
    * @note if a profiler session has a already started, `profilerStart` has

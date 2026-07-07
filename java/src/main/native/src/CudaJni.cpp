@@ -4,6 +4,7 @@
  */
 
 #include "jni_utils.hpp"
+#include "multi_buffer_copy.hpp"
 
 #include <rmm/device_buffer.hpp>
 
@@ -404,6 +405,39 @@ JNIEXPORT void JNICALL Java_ai_rapids_cudf_Cuda_memcpyOnStream(
     auto stream = reinterpret_cast<cudaStream_t>(jstream);
     CUDF_CUDA_TRY(cudaMemcpyAsync(dst, src, count, kind, stream));
     CUDF_CUDA_TRY(cudaStreamSynchronize(stream));
+  }
+  JNI_CATCH(env, );
+}
+
+JNIEXPORT void JNICALL Java_ai_rapids_cudf_Cuda_multiBufferCopyAsyncNative(JNIEnv* env,
+                                                                           jclass,
+                                                                           jlongArray jdst_addrs,
+                                                                           jlongArray jsrc_addrs,
+                                                                           jlongArray jcopy_sizes,
+                                                                           jlong jstream)
+{
+  JNI_NULL_CHECK(env, jdst_addrs, "dst addresses are null", );
+  JNI_NULL_CHECK(env, jsrc_addrs, "src addresses are null", );
+  JNI_NULL_CHECK(env, jcopy_sizes, "copy sizes are null", );
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto const stream = rmm::cuda_stream_view{reinterpret_cast<cudaStream_t>(jstream)};
+    cudf::jni::native_jlongArray const dst_addrs(env, jdst_addrs);
+    cudf::jni::native_jlongArray const src_addrs(env, jsrc_addrs);
+    cudf::jni::native_jlongArray const copy_sizes(env, jcopy_sizes);
+    JNI_ARG_CHECK(
+      env, dst_addrs.size() == src_addrs.size(), "dst and src addresses differ in size", );
+    JNI_ARG_CHECK(
+      env, dst_addrs.size() == copy_sizes.size(), "addresses and sizes differ in size", );
+    auto const n = static_cast<std::size_t>(dst_addrs.size());
+    if (n == 0) { return; }
+
+    cudf::java::multi_buffer_copy_async(reinterpret_cast<int64_t const*>(dst_addrs.data()),
+                                        reinterpret_cast<int64_t const*>(src_addrs.data()),
+                                        reinterpret_cast<int64_t const*>(copy_sizes.data()),
+                                        n,
+                                        stream);
   }
   JNI_CATCH(env, );
 }
