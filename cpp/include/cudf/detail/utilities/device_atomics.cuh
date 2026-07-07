@@ -354,58 +354,39 @@ __device__ __forceinline__ uint64_t calculate_carry_64(uint64_t old_val,
 }
 
 /**
- * @brief Atomic addition for __int128_t with architecture-specific optimization
+ * @brief Atomic addition for __int128_t via wait-free two-limb accumulation
  *
- * Uses native 128-bit CAS on Hopper+ GPUs (compute capability 9.0+) for optimal
- * performance. Falls back to two 64-bit atomic CAS operations with carry propagation
- * on older GPU architectures.
+ * A 128-bit addition decomposes into a 64-bit add of the low limbs plus a 64-bit add of
+ * the high limbs and the low-limb carry. Hardware `atomicAdd` serializes per limb without
+ * any retry, each add detects its own carry exactly once from the returned old value, and
+ * addition commutes, so the final (high, low) pair equals the exact 128-bit sum mod 2^128
+ * regardless of interleaving. This avoids the CAS retry loops that previously serialized
+ * heavily-contended accumulators (for example decimal128 sums grouped into few groups).
+ *
+ * The returned value reconstructs the pre-add value limb-wise and is not a single atomic
+ * 128-bit snapshot when other threads add concurrently (matching the guarantees of the
+ * previous per-limb CAS fallback); aggregation call sites ignore the result.
  *
  * @param address Pointer to the __int128_t value
  * @param val Value to add
- * @return The old value before addition
+ * @return The old value before addition, reconstructed per limb
  */
 __forceinline__ __device__ __int128_t atomic_add(__int128_t* address, __int128_t val)
 {
-#if __CUDA_ARCH__ >= 900
-  __int128_t expected, desired;
-
-  do {
-    expected = *address;
-    desired  = expected + val;
-  } while (atomicCAS(address, expected, desired) != expected);
-
-  return expected;
-#else
-  uint64_t* const target_ptr         = reinterpret_cast<uint64_t*>(address);
+  auto* const target_ptr             = reinterpret_cast<unsigned long long*>(address);
   __uint128_t const add_val_unsigned = static_cast<__uint128_t>(val);
 
   // Split the 128-bit add value into two 64-bit parts
-  uint64_t const add_low  = static_cast<uint64_t>(add_val_unsigned);
-  uint64_t const add_high = static_cast<uint64_t>(add_val_unsigned >> 64);
+  auto const add_low  = static_cast<unsigned long long>(add_val_unsigned);
+  auto const add_high = static_cast<unsigned long long>(add_val_unsigned >> 64);
 
-  uint64_t carry = 0;
-  uint64_t old_parts[2];
-  auto atomic_add_word = [&](int i, uint64_t current_add) {
-    uint64_t expected_part, new_part;
-    cuda::atomic_ref<uint64_t, cuda::thread_scope_device> atomic_part{target_ptr[i]};
+  unsigned long long const old_low = atomicAdd(target_ptr, add_low);
+  unsigned long long const carry   = calculate_carry_64(old_low, add_low, 0);
+  // (add_high + carry) may wrap; the high limb is accumulated mod 2^64 by construction
+  unsigned long long const old_high = atomicAdd(target_ptr + 1, add_high + carry);
 
-    do {
-      expected_part = atomic_part.load();
-      new_part      = expected_part + current_add + carry;
-    } while (
-      !atomic_part.compare_exchange_weak(expected_part, new_part, cuda::memory_order_relaxed));
-
-    old_parts[i] = expected_part;
-    carry        = calculate_carry_64(expected_part, current_add, carry);
-  };
-
-  atomic_add_word(0, add_low);
-  atomic_add_word(1, add_high);
-
-  __uint128_t const old_val_unsigned =
-    (static_cast<__uint128_t>(old_parts[1]) << 64) | old_parts[0];
+  __uint128_t const old_val_unsigned = (static_cast<__uint128_t>(old_high) << 64) | old_low;
   return static_cast<__int128_t>(old_val_unsigned);
-#endif
 }
 
 }  // namespace detail
