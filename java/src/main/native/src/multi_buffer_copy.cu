@@ -26,14 +26,14 @@ void multi_buffer_copy_async(int64_t const* dst_addrs,
   if (num_buffers == 0) { return; }
 
   // Upload the address/size table in one copy, then run one batched copy kernel instead
-  // of one memcpy call per buffer. make_device_uvector_sync synchronizes the stream after
-  // the upload, so the host staging vector may be released on return.
+  // of one memcpy call per buffer. make_device_uvector synchronizes the stream after the
+  // upload, so the host staging vector may be released on return.
   std::vector<int64_t> host_table;
   host_table.reserve(num_buffers * 3);
   host_table.insert(host_table.end(), src_addrs, src_addrs + num_buffers);
   host_table.insert(host_table.end(), dst_addrs, dst_addrs + num_buffers);
   host_table.insert(host_table.end(), copy_sizes, copy_sizes + num_buffers);
-  auto const d_table = cudf::detail::make_device_uvector_sync(
+  auto const d_table = cudf::detail::make_device_uvector(
     cudf::host_span<int64_t const>{host_table.data(), host_table.size()},
     stream,
     cudf::get_current_device_resource_ref());
